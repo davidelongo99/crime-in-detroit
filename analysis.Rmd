@@ -1,0 +1,172 @@
+---
+title: "Crime_Detroit_Data_Analysis"
+author: "Davide Longo"
+date: "2024-02-05"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Spatial Patterns of Crime in Detroit
+
+The purpose of this analysis is to investigate the spatial patterns of crime in Detroit, employing spatial regression models to assess the influence of  proximity on crime rates. The procedure involves using Moran's I for spatial autocorrelation, followed by various spatial models like the Spatial Durbin Model, Spatial Error Model and Spatial Autoregressive Model. The main findings reveal significant spatial clustering of crime, indicating that certain areas are more prone to high crime rates due to specific spatial factors.
+
+```{r}
+# Load necessary library
+library(spdep)
+library(sf)
+library(dplyr)
+library(tmap)
+library(leaflet)
+library(spatialreg) 
+```
+
+```{r}
+# Read the neighborhoods shapefile
+nbr <- st_read("crime_detroit.shp")
+```
+```{r}
+# Defining contiguity-based neighbours
+neighbors <- poly2nb(nbr, queen=T)
+print(neighbors)
+
+# Defining spatial weights
+weights <- nb2listw(neighbors, style="W")
+```
+
+```{r}
+coords <- st_centroid(st_geometry(nbr))
+
+plot(st_geometry(nbr), border="grey") 
+plot(neighbors, coords, add=TRUE)
+```
+## Spatial autocorrelation of the number of crimes
+
+```{r}
+# Extract the variable we want to test for spatial autocorrelation
+variable <- nbr$ncrimes
+
+# Compute Moran's I statistic
+moran <- moran.test(variable, listw = weights)
+
+# Print Moran's I test results
+print(moran)
+
+# Interpret the results
+cat("Moran's I Statistic:", moran$statistic, "\n")
+cat("Expected Moran's I under randomization:", moran$expected, "\n")
+cat("p-value:", moran$p.value, "\n")
+
+# Check for significance
+if (moran$p.value < 0.05) {
+  cat("\nThe Moran's I test is significant at the 0.05 level, 
+      indicating spatial autocorrelation.\n")
+} else {
+  cat("\nThe Moran's I test is not significant at the 0.05 level, 
+      indicating no spatial autocorrelation.\n")
+}
+```
+```{r}
+mplot <- moran.plot(nbr$ncrimes, listw=weights, main="Moran scatterplot")
+grid()
+```
+
+
+Each point on the Moran scatterplot represents a spatial unit (e.g., a neighborhood) with its crime count and the average crime count of its neighbors.
+
+The positive slope of the fitted line indicates positive spatial autocorrelation; that is, areas with high crime rates are likely to be surrounded by areas with similarly high crime rates, and the same for low-crime areas.
+Most data points cluster around the lower left corner, suggesting that many areas have low crime rates and are surrounded by areas with similarly low crime rates. Some data points are significantly above the fitted line, especially those labeled (e.g., 90, 141, 46). These may be outlier areas with high crime rates surrounded by areas with lower crime rates. A few points on the upper right suggest that there are also areas with high crime rates surrounded by similar areas. Finally, the scatterplot is divided by a dashed line, which represents the mean value of the variable 'number of crimes'. Points above this line indicate areas where the observed number of crimes is higher than the average, and those below indicate areas with fewer crimes than the average.
+
+
+## Choosing the proper specification for spatial regression model
+
+Let's start by fitting a standard linear regression model and perform LM-tests of spatial autocorrelation of the residuals. The null hypothesis states that the residuals are independent.
+
+```{r}
+#The LM test can be computed using the function "lm.LMtests"
+OLSmodel <- lm(ncrimes~ education + food_drink + healthcare + finance + socio_cult + police_sta, data=nbr)
+
+natOLSlmTests <- lm.LMtests(OLSmodel, weights, 
+                    test=c("LMerr", "LMlag", "RLMerr", "RLMlag"))
+summary(natOLSlmTests)
+```
+Since LM-err and LM-lag null hypothesis were rejected, let's fit SAR, SEM and SDM models and compare them.
+
+```{r}
+#To estimate the SAR model using the Maximum likelihood estimator
+#we can use the function "lagsarlm",
+SAR <- lagsarlm(ncrimes~ education + food_drink + healthcare + finance + socio_cult + police_sta,
+                data = nbr, 
+                listw=weights)
+summary(SAR)
+```
+
+```{r}
+#To estimate the SEM model using the Maximum likelihood estimator
+#we can use the function "errorsarlm",
+SEM <- errorsarlm(ncrimes~ education + food_drink + healthcare + finance + socio_cult + police_sta,
+                data = nbr, 
+                listw=weights)
+summary(SEM)
+```
+
+```{r}
+#To estimate the SDM model using the Maximum likelihood estimator
+#we can use the function "lagsarlm" with specification "mixed",
+SDM <- lagsarlm(ncrimes~ education + food_drink + healthcare + finance + socio_cult + police_sta,
+                data = nbr, 
+                listw=weights,
+                type="mixed")
+summary(SDM)
+```
+
+The spatial lag model (lagsarlm) results suggest that the distance to various amenities and facilities, including education, food and drink, healthcare, finance, socio-cultural areas, and police stations, play a significant role in the spatial distribution of crime rates in Detroit. 
+
+1. **Police Stations (police_sta)**: The positive coefficient for the distance to police stations indicates that as the distance from a police station increases, the number of crimes also increases. This is statistically significant (p-value: 0.004823), suggesting that proximity to police stations may have a deterrent effect on crime.
+
+2. **Socio-Cultural Factors (socio_cult)**: The negative coefficient indicates that greater distances to socio-cultural facilities correlate with a decrease in crime rates, which is significant (p-value: 0.043703). This could imply that closer proximity to socio-cultural amenities may be associated with lower crime rates.
+
+3. **Lagged Variables**: The significant positive coefficient for lagged socio-cultural distances (lag.socio_cult) suggests that if neighboring areas are further from socio-cultural facilities, the focal area may experience higher crime rates (p-value: 0.016322). Conversely, greater distances to police stations in neighboring areas (lag.police_sta) correlate with lower crime rates in the focal area, which is also statistically significant (p-value: 0.012299). This could indicate a spill-over effect where the benefits of proximity to police stations extend beyond immediate neighborhoods.
+
+4. **Spatial Autocorrelation (Rho)**: A significant rho value (0.25751) with a corresponding p-value of 0.0050254 confirms the presence of spatial autocorrelation in the crime data, affirming that crime rates in one area are related to those in neighboring areas.
+
+###The selection strategy proposed by Elhorst (2010): 
+
+1 - Estimate the OLS model and test (with the LM test) whether the SL or the SEM is more appropriate to describe the data.
+2 - If the OLS model is rejected in favour of the SL, the SEM or in favour of both models, then the SDM should be estimated.
+3 - likelihood ratio (LR) tests can subsequently be used to test whether 
+  i) the SDM can be simplified to the SLM, 
+  ii) whether it can be simplified to the SEM.
+
+If both hypotheses are rejected, then the SDM best describes the data. 
+  
+We can perform LR tests of restrictions on the parameters of spatial models using the function "anova".
+
+```{r}
+# test hypotesis i
+anova(SDM, SAR)
+```
+The Spatial Durbin Model (SDM) is more appropriate for this data set than the Spatial Autoregressive Model (SAR), as indicated by the lower AIC, higher log-likelihood, and the significant likelihood ratio test. This implies that incorporating both the spatial lags of the dependent variable and the independent variables (as the SDM does) captures the spatial dynamics of crime rates more effectively than just including the spatial lag of the dependent variable (as the SAR does).
+
+```{r}
+# test hypothesis ii
+anova(SDM, SEM)
+```
+When comparing the SDM and SEM, the SDM appears to be the more appropriate model for analyzing the spatial dynamics of crime rates in this context. The lower AIC, higher log-likelihood, and significant likelihood ratio test all suggest that the SDM, which likely includes both spatially lagged dependent and independent variables, captures the spatial processes affecting crime rates more effectively than the SEM, which focuses on spatial error correlation. This implies that both the spatial influence of neighboring regions and the spatial distribution of explanatory variables are important factors in understanding the spatial patterns of crime.
+
+**Since both hypotheses are rejected, Spatial Durbin Model (SDM) is the model best describing the data, suggesting local spatial spillovers underlying the phenomenon under study.**
+
+```{r}
+impSDM <- impacts(SDM, listw=weights, R=100)
+summary(impSDM, zstats=TRUE, short=TRUE)
+```
+# Conclusions
+
+Proximity to police stations may have a deterrent effect on crime. On the contrary, greater distances to socio-cultural facilities correlate with a decrease in crime rates. This could imply that also closer proximity to socio-cultural amenities may be associated with lower crime rates.
+The significant positive coefficient for lagged socio-cultural distances suggests that if neighboring areas are further from socio-cultural facilities, the focal area may experience higher crime rates.  Conversely, greater distances to police stations in neighboring areas correlate with lower crime rates in the focal area. This indicates a spill-over effect where the benefits of proximity to police stations extend beyond immediate neighborhoods.
+
+
